@@ -1,0 +1,9 @@
+[project]
+name = "tick-research"
+version = "0.1.0"
+description = "Public market data capture for wick research (v0: raw append log + density stats)"
+requires-python = ">=3.14"  # compression.zstd is stdlib from 3.14
+dependencies = ["websockets>=14"]
+
+[tool.uv]
+package = false
