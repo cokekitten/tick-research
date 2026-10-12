@@ -7,7 +7,8 @@ No API keys, read-only public endpoints, no trading.
 uv sync
 .venv/bin/python -m tick.run --duration 180      # all six venue-markets, 3 minutes
 .venv/bin/python -m tick.normalize               # raw log -> data/norm/*.parquet (see SCHEMA.md)
-.venv/bin/python -m tick.verify                  # book rebuild vs BBO feed, cross-venue units
+.venv/bin/python -m tick.verify                  # book rebuild vs BBO feed, cross-venue units (exit code)
+.venv/bin/python -m pytest -q                    # crash/restart/anchoring/unit regression tests
 .venv/bin/python -m tick.run                     # run until Ctrl-C / SIGTERM
 ```
 
@@ -15,8 +16,8 @@ uv sync
 
 Every USDT-quoted spot market and USDT-margined linear perpetual on Binance, Bybit and OKX (3,336
 markets on 2026-10-12), one collector process per venue-market. Per market: L2 book (>=200 levels, 100ms),
-native BBO (tick-by-tick or 10-20ms), individual trades; perps also liquidations, mark, index,
-funding and open interest. Units, ids and per-venue differences are documented in `SCHEMA.md`.
+native BBO (tick-by-tick or 10-20ms), individual trades, dynamic price limits (Bybit, OKX); perps
+also liquidations, mark, index, funding and open interest. Units, ids and per-venue differences are documented in `SCHEMA.md`.
 
 Measured on a laptop, all 3,336 USDT markets: ~22k messages/s, ~67% of one CPU core across six
 processes, event-loop lag <=1ms, **~117 GB/day zstd** raw log (book ~1/3, BBO ~1/2 of bytes).
@@ -27,18 +28,21 @@ accepts every subscription but silently delivers depth only (verified 2026-10-12
 
 ## Raw log format
 
-`data/raw/<venue>-<market>/<YYYYMMDD-HH UTC>.jsonl.zst`, append-only, a zstd frame closed every ~1s.
+`data/raw/<venue>-<market>/<run_id>-<seg>.jsonl.zst`: one run per collector start, 15-minute (or
+2 GiB) segments, the open one named `.partial`. A crash can only damage the open segment; the next
+start writes new files. A lock file refuses a second collector for the same venue-market.
 
 ```json
 {"k":"ws|rest|evt","c":conn_id,"n":seq,"w":wall_ns,"m":mono_ns, ...,"d":<exchange payload verbatim>}
 ```
 
 * `w` / `m`: local wall-clock and monotonic receive time. REST lines also carry request start `t0w`/`t0m`.
-* `evt`: connect / close / error / handshake_rejected / stop. Gaps are detected offline from these + sequence ids.
-* Instrument lists are logged as REST bodies (`\"ep\":\"instruments\"`) at start and every hour; `data/meta/instruments-*.json` is a readable copy.
+* `evt`: connect / close / error / gap / sub_rejected / task_error / registry / stop.
+* Instrument lists are logged as REST bodies (`"ep":"instruments"`) at start and every hour.
+* A zstd frame is closed every second; a process crash loses at most ~1s. Data is not fsync'd, so an
+  OS crash or power loss can lose more.
 
-Nothing is parsed, deduplicated or dropped on the write path. Dedup (e.g. the author's
-"same market, same 5s bucket, identical row" rule) belongs to a later, versioned packing step.
+Nothing is parsed, deduplicated or dropped on the write path.
 
 ## Safety
 
@@ -48,6 +52,9 @@ Nothing is parsed, deduplicated or dropped on the write path. Dedup (e.g. the au
 * Binance REST weight is read from `x-mbx-used-weight-1m`; snapshot pacing slows down above a threshold.
 * Websocket handshakes are staggered per venue; OKX perp and spot share its per-IP connection rate.
 * Stops when disk free space drops below `--min-free-gb` (default 15).
+* `tick.run` restarts a crashed collector with backoff (30s, 60s, ... 10 min, at most 6 per hour);
+  rate-limit, disk and stop-file exits are never restarted. If any long-lived task of a collector
+  dies, the collector exits so it gets restarted instead of running half-dead.
 * Websockets and REST bypass the macOS system proxy on purpose: latency must be from our own vantage point.
 
 ## Known limitations

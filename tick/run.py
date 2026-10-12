@@ -5,7 +5,8 @@
 
 Each child logs to data/logs/<venue>-<market>.log. A child that exits because of a rate limit
 (exit code 2 + data/meta/STOP-<venue>) is not restarted, and the other collectors of that venue
-stop by themselves when they see the stop file. Other crashes are restarted after 30s.
+stop by themselves when they see the stop file. Other crashes are restarted with exponential backoff
+(30s, 60s, ... up to 10 min), at most --max-restarts times per hour.
 """
 import argparse
 import os
@@ -24,6 +25,7 @@ def main():
     ap.add_argument("--root", default="data")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--no-bbo", action="store_true")
+    ap.add_argument("--max-restarts", type=int, default=6, help="per collector per hour before giving up")
     a = ap.parse_args()
 
     jobs = [j.strip() for j in a.only.split(",") if j.strip()]
@@ -59,20 +61,32 @@ def main():
         time.sleep(2)  # spread startup REST bursts
 
     restart_at: dict[str, float] = {}
+    recent: dict[str, list] = {j: [] for j in jobs}   # monotonic times of restarts, last hour
     while len(done) < len(jobs):
         time.sleep(1)
+        now = time.monotonic()
         for job, p in list(procs.items()):
             if job in done or p.poll() is None:
                 continue
             code = p.returncode
+            # 0 = finished, 2 = rate limit / disk / stop file, 3 = refused to start: never restart
             if stopping or a.duration or code in (0, 2, 3):
                 print(f"{job} exited code={code}", flush=True)
                 done.add(job)
                 continue
             if job not in restart_at:
-                print(f"{job} crashed code={code}; restart in 30s", flush=True)
-                restart_at[job] = time.time() + 30
-            elif time.time() >= restart_at.pop(job):
+                recent[job] = [t for t in recent[job] if now - t < 3600]
+                if len(recent[job]) >= a.max_restarts:
+                    print(f"{job} crashed code={code}; {len(recent[job])} restarts in the last hour, giving up",
+                          flush=True)
+                    done.add(job)
+                    continue
+                delay = min(30 * 2 ** len(recent[job]), 600)
+                print(f"{job} crashed code={code}; restart in {delay}s", flush=True)
+                restart_at[job] = now + delay
+            elif now >= restart_at[job]:
+                del restart_at[job]
+                recent[job].append(now)
                 start(job)
     print("all collectors stopped", flush=True)
 

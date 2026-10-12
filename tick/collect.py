@@ -6,6 +6,7 @@ Captures every stablecoin-quoted (USDT/USDC/FDUSD/USD1) linear perpetual or spot
   book    L2 >=200 levels at ~100ms, kept continuous: a sequence gap triggers an immediate resync
   bbo     best bid/ask, tick-by-tick or 10-20ms (Binance bookTicker / Bybit orderbook.1 / OKX bbo-tbt)
   trade   individual fills (Binance @trade / Bybit publicTrade / OKX trades-all)
+  limit   dynamic price limits (Bybit priceLimit, OKX price-limit; Binance has no public feed)
   perp    liquidations, mark / index / funding / open interest
 Every message is logged verbatim with local wall + monotonic receive time (see tick.common.RawWriter).
 Instrument lists are re-fetched hourly; new listings get their own connection.
@@ -27,7 +28,7 @@ from dataclasses import dataclass, field
 import orjson
 import websockets
 
-from .common import RateLimited, RawWriter, as_json_text, http_get
+from .common import RateLimited, RawWriter, as_json_text, http_get, new_run_id
 from .registry import INSTRUMENT_URLS, PARSERS, fetch_volumes
 
 TIME_URLS = {
@@ -51,9 +52,27 @@ class Ctx:
         self.stop = asyncio.Event()
         self.fatal: str | None = None
         self._conn = itertools.count(1)
-        self.w = RawWriter(a.root, f"{a.venue}-{a.market}")
+        self.run_id = new_run_id()
+        self.w = RawWriter(a.root, f"{a.venue}-{a.market}", self.run_id)
         self.msgs = 0
         self.rest_sem = asyncio.Semaphore(8)
+        self.bg: set = set()
+        self.crash: str | None = None
+
+    def spawn(self, coro, name: str):
+        """Fire-and-forget task whose failure is logged instead of vanishing."""
+        t = asyncio.create_task(coro, name=name)
+        self.bg.add(t)
+        t.add_done_callback(self._bg_done)
+        return t
+
+    def _bg_done(self, t: asyncio.Task):
+        self.bg.discard(t)
+        if t.cancelled():
+            return
+        e = t.exception()
+        if e is not None:
+            self.w.event(0, {"type": "task_error", "task": t.get_name(), "err": repr(e)[:300]})
 
     def conn_id(self) -> int:
         return next(self._conn)
@@ -128,6 +147,20 @@ class ConnState:
         t.add_done_callback(self.tasks.discard)
 
 
+def _is_reject(msg) -> bool:
+    """Bybit {"success":false}, OKX {"event":"error"}, Binance {"error":...} on control messages."""
+    if isinstance(msg, bytes):
+        msg = msg.decode("utf-8", "replace")
+    return '"success":false' in msg or '"event":"error"' in msg or msg.startswith('{"error"')
+
+
+def _is_rate_reject(msg) -> bool:
+    if isinstance(msg, bytes):
+        msg = msg.decode("utf-8", "replace")
+    low = msg.lower()
+    return "too many" in low or '"code":"60014"' in msg or '"code":"63999"' in msg or "rate limit" in low
+
+
 async def _pinger(ws, payload: str, every: float):
     while True:
         await asyncio.sleep(every)
@@ -157,6 +190,10 @@ async def ws_loop(ctx: Ctx, spec: Spec, start_delay: float = 0.0):
                     async for msg in ws:
                         w.write("ws", conn, time.time_ns(), time.monotonic_ns(), as_json_text(msg))
                         ctx.msgs += 1
+                        if len(msg) < 600 and _is_reject(msg):
+                            w.event(conn, {"type": "sub_rejected", "name": spec.name, "msg": msg[:400]})
+                            if _is_rate_reject(msg):
+                                ctx.rate_limited(f"websocket reject: {msg[:200]}")
                         if spec.check:
                             try:
                                 spec.check(st, ws, msg)
@@ -211,9 +248,10 @@ class Snapshots:
         self.seq = itertools.count()
 
     def request(self, sym: str, conn: int, why: str):
+        """One pending request per symbol; a request for a newer connection always replaces an older one."""
         prio = {"gap": 0, "connect": 1, "new": 1}.get(why, 2)
         cur = self.pending.get(sym)
-        if cur is not None and cur[0] <= prio:
+        if cur is not None and cur[0] <= prio and cur[2] >= conn:
             return
         self.pending[sym] = (prio, why, conn)
         self.q.put_nowait((prio, next(self.seq), sym))
@@ -226,15 +264,16 @@ class Snapshots:
                 continue
             cur = self.pending.get(sym)
             if cur is None or cur[0] != prio:
-                continue  # superseded by a higher-priority request
+                continue  # superseded by another request for this symbol
             del self.pending[sym]
-            asyncio.create_task(self._one(sym, cur[1], cur[2]))
+            self.ctx.spawn(self._one(sym, cur[1], cur[2]), f"snapshot:{sym}")
             await sleep_or_stop(self.ctx, self.interval)
 
     async def _one(self, sym, why, conn):
         try:
             info, _ = await rest_record(self.ctx, self.url_fmt.format(sym=sym),
-                                        {"ep": "depth", "sym": sym, "why": why, "for_conn": conn})
+                                        {"ep": "depth", "sym": sym, "why": why, "for_conn": conn,
+                                         "req": next(self.seq)})
             if info.get("wt", 0) > self.backoff_used:
                 self.ctx.w.event(0, {"type": "weight_backoff", "wt": info["wt"]})
                 self.interval *= 1.5
@@ -274,6 +313,7 @@ class Binance:
                                    weight=10, budget_per_min=900, backoff_used=1500)
             self.resnap_s = 1800
         self.syms: list = []
+        self.sym_conn: dict = {}   # symbol -> connection currently carrying its diff stream
         self.k = itertools.count()
 
     def specs(self, recs, why="connect"):
@@ -288,6 +328,7 @@ class Binance:
 
             def on_open(conn, part=part):
                 for s in part:  # snapshot after the diff stream is live; replay is done offline
+                    self.sym_conn[s] = conn
                     self.snaps.request(s, conn, why)
 
             out.append(Spec(f"binance-{self.a.market}-{next(self.k)}", self.ws + "/".join(streams), streams,
@@ -310,7 +351,7 @@ class Binance:
         while not self.ctx.stop.is_set():
             await sleep_or_stop(self.ctx, self.resnap_s)
             for s in list(self.syms):
-                self.snaps.request(s, 0, "periodic")
+                self.snaps.request(s, self.sym_conn.get(s, 0), "periodic")
 
     async def _oi_poll(self, period=120.0):
         """Open interest has no Binance websocket; poll every symbol every `period` seconds (weight 1)."""
@@ -320,7 +361,7 @@ class Binance:
             for s in syms:
                 if self.ctx.stop.is_set():
                     return
-                asyncio.create_task(self._oi(s))
+                self.ctx.spawn(self._oi(s), f"oi:{s}")
                 await asyncio.sleep(gap)
 
     async def _oi(self, s):
@@ -366,6 +407,7 @@ class Bybit:
                 topics += [f"orderbook.200.{s}", f"publicTrade.{s}"]
                 if self.a.bbo:
                     topics.append(f"orderbook.1.{s}")
+                topics.append(f"priceLimit.{s}")
                 if self.a.market == "perp":
                     topics += [f"allLiquidation.{s}", f"tickers.{s}"]
             subs = [orjson.dumps({"op": "subscribe", "args": topics[i:i + 10]}).decode() for i in range(0, len(topics), 10)]
@@ -427,6 +469,7 @@ class Okx:
                 pub.append({"channel": "books", "instId": inst})
                 if self.a.bbo:
                     pub.append({"channel": "bbo-tbt", "instId": inst})
+                pub.append({"channel": "price-limit", "instId": inst})
                 biz.append({"channel": "trades-all", "instId": inst})
                 if perp:
                     pub += [{"channel": c, "instId": inst} for c in ("funding-rate", "open-interest", "mark-price")]
@@ -568,27 +611,42 @@ async def amain(a):
     stagger = STAGGER[a.venue]
     offset = itertools.count()
 
+    def critical_done(t: asyncio.Task):
+        if t.cancelled() or ctx.stop.is_set():
+            return
+        e = t.exception()
+        ctx.crash = f"{t.get_name()} died: {e!r}"[:300] if e else f"{t.get_name()} exited unexpectedly"
+        ctx.w.event(0, {"type": "task_died", "task": t.get_name(), "err": ctx.crash})
+        ctx.stop.set()
+
     def launch(spec: Spec, delay: float | None = None):
         d = (next(offset) * stagger + (0.4 if a.market == "spot" and a.venue == "okx" else 0.0)) if delay is None else delay
-        t = asyncio.create_task(ws_loop(ctx, spec, d))
+        t = asyncio.create_task(ws_loop(ctx, spec, d), name=f"ws:{spec.name}")
+        t.add_done_callback(critical_done)
         running.add(t)
 
     for sp in venue_obj.global_specs() + venue_obj.specs(recs):
         launch(sp)
     known = {r["sym"] for r in recs}
-    for coro in venue_obj.tasks() + [clock_probe(ctx), guards(ctx, a.duration),
-                                     registry_refresh(ctx, venue_obj, known, a.registry_min * 60, launch)]:
-        running.add(asyncio.create_task(coro))
+    named = [(c.cr_code.co_name if hasattr(c, "cr_code") else "task", c) for c in venue_obj.tasks()]
+    named += [("clock_probe", clock_probe(ctx)), ("guards", guards(ctx, a.duration)),
+              ("registry", registry_refresh(ctx, venue_obj, known, a.registry_min * 60, launch))]
+    for name, coro in named:
+        t = asyncio.create_task(coro, name=name)
+        t.add_done_callback(critical_done)
+        running.add(t)
 
     await ctx.stop.wait()
     await asyncio.sleep(0.5)  # let in-flight writes land
-    for t in list(running):
+    for t in list(running) + list(ctx.bg):  # stop websockets and background REST before closing the log
         t.cancel()
-    await asyncio.gather(*running, return_exceptions=True)
-    ctx.w.event(0, {"type": "stop", "fatal": ctx.fatal})
+    await asyncio.gather(*running, *ctx.bg, return_exceptions=True)
+    ctx.w.event(0, {"type": "stop", "fatal": ctx.fatal, "crash": ctx.crash})
     ctx.w.close()
-    print(f"stopped. fatal={ctx.fatal} msgs={ctx.msgs}", flush=True)
-    return 2 if ctx.fatal else 0
+    print(f"stopped. fatal={ctx.fatal} crash={ctx.crash} msgs={ctx.msgs}", flush=True)
+    if ctx.fatal:
+        return 2   # rate limit / disk / stop file: supervisor must not restart
+    return 1 if ctx.crash else 0
 
 
 def main():
