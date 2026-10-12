@@ -58,4 +58,4 @@ Nothing is parsed, deduplicated or dropped on the write path. Dedup (e.g. the au
 * Same ticker on two venues is assumed to be the same asset (crypto vs tradfi collisions are separated via `coin_id`).
 * No Gate/Bitget/KuCoin/MEXC/Hyperliquid yet.
 * Binance liquidations are throttled by the exchange (at most one per symbol per second).
-* `tick/stats.py` still reads the v0 raw layout and is superseded by `normalize` + `verify`.
+
