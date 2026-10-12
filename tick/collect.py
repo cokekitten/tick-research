@@ -48,12 +48,13 @@ def stop_files(root, venue):
 class Ctx:
     def __init__(self, a):
         self.root, self.venue, self.market = a.root, a.venue, a.market
+        self.stream = a.venue + "-" + a.market + ("-" + a.tag if a.tag else "")
         self.min_free = a.min_free_gb * 1e9
         self.stop = asyncio.Event()
         self.fatal: str | None = None
         self._conn = itertools.count(1)
         self.run_id = new_run_id()
-        self.w = RawWriter(a.root, f"{a.venue}-{a.market}", self.run_id)
+        self.w = RawWriter(a.root, self.stream, self.run_id)
         self.msgs = 0
         self.rest_sem = asyncio.Semaphore(8)
         self.bg: set = set()
@@ -598,13 +599,16 @@ async def amain(a):
         ctx.w.close()
         return 2
     recs.sort(key=lambda r: vols.get(r["sym"], 0.0), reverse=True)
+    recs = recs[a.skip:]
+    if a.mod:   # rank modulo: the busiest markets are spread over the shards instead of grouping
+        recs = [r for i, r in enumerate(recs) if i % a.mod == a.rem]
     if a.limit:
         recs = recs[:a.limit]
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    with open(os.path.join(a.root, "meta", f"instruments-{a.venue}-{a.market}-{stamp}.json"), "wb") as f:
+    with open(os.path.join(a.root, "meta", f"instruments-{ctx.stream}-{stamp}.json"), "wb") as f:
         f.write(orjson.dumps({"ts": stamp, "count": len(recs), "bbo": a.bbo, "shard": a.shard,
                               "markets": [{**r, "qv24h": vols.get(r["sym"])} for r in recs]}, option=orjson.OPT_INDENT_2))
-    print(f"{a.venue}-{a.market}: {len(recs)} markets, top: {' '.join(r['sym'] for r in recs[:8])}", flush=True)
+    print(f"{ctx.stream}: {len(recs)} markets, top: {' '.join(r['sym'] for r in recs[:8])}", flush=True)
 
     venue_obj = VENUES[a.venue](ctx, a)
     running: set = set()
@@ -656,6 +660,10 @@ def main():
     ap.add_argument("--duration", type=float, default=0, help="seconds; 0 = until SIGINT/SIGTERM")
     ap.add_argument("--root", default="data")
     ap.add_argument("--limit", type=int, default=0, help="only the N busiest markets (0 = all)")
+    ap.add_argument("--skip", type=int, default=0, help="skip the N busiest markets first (sharding)")
+    ap.add_argument("--mod", type=int, default=0, help="shard by rank: keep markets where rank %% MOD == REM")
+    ap.add_argument("--rem", type=int, default=0, help="this shard's remainder, used with --mod")
+    ap.add_argument("--tag", default="", help="suffix for this shard's raw stream name")
     ap.add_argument("--shard", type=int, default=50, help="markets per websocket connection")
     ap.add_argument("--bbo", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--registry-min", type=float, default=60, help="instrument list refresh interval")

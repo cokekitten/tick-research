@@ -15,7 +15,11 @@ import subprocess
 import sys
 import time
 
-ALL = ["binance-perp", "binance-spot", "bybit-perp", "bybit-spot", "okx-perp", "okx-spot"]
+# binance-perp is split into shards: its stream is the largest and one process cannot keep up
+# with its receive timestamps (event-loop lag grew past 200ms at ~18k msg/s).
+ALL = ["binance-perp-a", "binance-perp-b", "binance-perp-c",
+       "binance-spot", "bybit-perp", "bybit-spot", "okx-perp", "okx-spot"]
+SHARDS = {"binance-perp": 3}
 
 
 def main():
@@ -35,8 +39,13 @@ def main():
     stopping = False
 
     def start(job):
-        venue, market = job.split("-")
+        parts = job.split("-")
+        venue, market = parts[0], parts[1]
+        tag = parts[2] if len(parts) > 2 else ""
         cmd = [sys.executable, "-m", "tick.collect", "--venue", venue, "--market", market, "--root", a.root]
+        if tag:
+            n = SHARDS[f"{venue}-{market}"]
+            cmd += ["--tag", tag, "--mod", str(n), "--rem", str("abc".index(tag))]
         if a.duration:
             cmd += ["--duration", str(a.duration)]
         if a.limit:

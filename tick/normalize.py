@@ -504,7 +504,7 @@ def run_id_of(path: str) -> str:
 
 
 def normalize_vm(root: str, vm: str, batch_rows: int = 200_000, include_partial: bool = False):
-    venue, market = vm.split("-")
+    venue, market = vm.split("-")[:2]   # vm may carry a shard suffix: binance-perp-a
     files = segment_files(root, vm, include_partial)
     meta = Meta(venue, market)
     chain_ids = ChainIds()

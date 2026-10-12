@@ -19,7 +19,9 @@ import pyarrow.parquet as pq
 
 from .normalize import SCHEMA_VERSION
 
-VMS = ("binance-perp", "binance-spot", "bybit-perp", "bybit-spot", "okx-perp", "okx-spot")
+def vms_in(root):
+    d = os.path.join(root, "norm", f"v{SCHEMA_VERSION}", "book")
+    return sorted(os.listdir(d)) if os.path.isdir(d) else []
 
 
 def files(root, table, vm):
@@ -70,7 +72,7 @@ def book_vs_bbo(root, vm, sample_syms=30):
 
 def mids(root):
     out = defaultdict(dict)
-    for vm in VMS:
+    for vm in vms_in(root):
         meta = {}
         for path in files(root, "instruments", vm):
             for r in pq.read_table(path, columns=["sym", "coin_id", "quote"]).to_pylist():
@@ -97,7 +99,7 @@ def main():
     ap.add_argument("--root", default="data")
     ap.add_argument("--min-compared", type=int, default=100)
     a = ap.parse_args()
-    present = [vm for vm in VMS if files(a.root, "book", vm)]
+    present = vms_in(a.root)
     if not present:
         print(f"NO DATA: nothing under {a.root}/norm/v{SCHEMA_VERSION}")
         raise SystemExit(2)
