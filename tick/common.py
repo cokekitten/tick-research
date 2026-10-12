@@ -1,22 +1,25 @@
-"""Shared helpers: direct REST fetch with rate-limit stop, raw append-log writer."""
+"""Shared helpers: direct REST fetch with rate-limit detection, raw append-log writer."""
 import json
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from compression import zstd
 
-UA = "tick-research/0.1"
-# Bypass macOS system proxy: we want the latency of our own vantage point.
+UA = "tick-research/0.2"
+# Bypass the macOS system proxy: latency must be measured from our own vantage point.
 _DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 class RateLimited(Exception):
-    """HTTP 418/429 seen. Whole collector must stop (shared IP limit)."""
+    """418/429 (or a venue's equivalent). Every process sharing that venue's limit must stop."""
 
 
 def http_get(url: str, timeout: float = 10.0):
     """Returns (status, body, (t0_wall_ns, t0_mono_ns, t1_wall_ns, t1_mono_ns), headers)."""
+    # Some symbols are not ASCII (Binance lists e.g. 龙虾USDT); percent-encode, keep URL syntax.
+    url = urllib.parse.quote(url, safe=":/?&=%-._~,[]")
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     t0w, t0m = time.time_ns(), time.monotonic_ns()
     try:
@@ -25,12 +28,12 @@ def http_get(url: str, timeout: float = 10.0):
     except urllib.error.HTTPError as e:
         if e.code in (418, 429):
             raise RateLimited(f"HTTP {e.code} {url}") from e
+        if e.code == 403 and "bybit.com" in url:  # Bybit answers IP rate limiting with 403
+            raise RateLimited(f"HTTP 403 {url}") from e
         raise
+    if b'"retCode":10006' in body[:120] or b'"code":"50011"' in body[:120]:  # Bybit / OKX too many visits
+        raise RateLimited(f"rate-limit body {url}")
     return status, body, (t0w, t0m, time.time_ns(), time.monotonic_ns()), hdr
-
-
-def http_json(url: str, timeout: float = 10.0):
-    return json.loads(http_get(url, timeout)[1])
 
 
 def as_json_text(raw) -> str:
@@ -44,15 +47,15 @@ def as_json_text(raw) -> str:
 
 
 class RawWriter:
-    """Append-only zstd JSONL, one file per exchange per UTC hour.
+    """Append-only zstd JSONL, one file per stream name per UTC hour.
 
     Line: {"k":kind,"c":conn_id,"n":seq,"w":wall_ns,"m":mono_ns,<extra>,"d":<verbatim payload>}
       kind: ws (websocket message) | rest (REST response) | evt (collector event)
     A zstd frame is closed every ~1s, so a crash loses at most ~1s and files stay readable.
     """
 
-    def __init__(self, root: str, ex: str, level: int = 3, flush_s: float = 1.0):
-        self.dir = os.path.join(root, "raw", ex)
+    def __init__(self, root: str, name: str, level: int = 3, flush_s: float = 1.0):
+        self.dir = os.path.join(root, "raw", name)
         os.makedirs(self.dir, exist_ok=True)
         self.level, self.flush_s = level, flush_s
         self.f, self.hour = None, None

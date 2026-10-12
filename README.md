@@ -5,28 +5,29 @@ No API keys, read-only public endpoints, no trading.
 
 ```bash
 uv sync
-.venv/bin/python -m tick.collect --top 50 --duration 120   # 2-minute smoke run
-.venv/bin/python -m tick.stats                              # density / gaps / latency / storage
-.venv/bin/python -m tick.collect --top 259                  # run until Ctrl-C / SIGTERM
+.venv/bin/python -m tick.run --duration 180      # all six venue-markets, 3 minutes
+.venv/bin/python -m tick.normalize               # raw log -> data/norm/*.parquet (see SCHEMA.md)
+.venv/bin/python -m tick.verify                  # book rebuild vs BBO feed, cross-venue units
+.venv/bin/python -m tick.run                     # run until Ctrl-C / SIGTERM
 ```
 
 ## What is captured
 
-Coins listed as USDT linear perpetuals on all three venues, ranked by Binance 24h quote volume.
+Every stablecoin-quoted linear perpetual and spot market on Binance, Bybit and OKX (4,148 markets on
+2026-10-12), one collector process per venue-market. Per market: L2 book (>=200 levels, 100ms),
+native BBO (tick-by-tick or 10-20ms), individual trades; perps also liquidations, mark, index,
+funding and open interest. Units, ids and per-venue differences are documented in `SCHEMA.md`.
 
-| venue | book | trades | other |
-|---|---|---|---|
-| Binance USD-M | `@depth@100ms` diff (`/public/stream`) + REST `depth?limit=1000` anchor on connect and every 30 min | `@aggTrade` (`/market/stream`) | `!forceOrder@arr`, `!markPrice@arr@1s` |
-| Bybit linear | `orderbook.50` (20ms snapshot/delta) | `publicTrade` | `allLiquidation`, `tickers` |
-| OKX SWAP | `books` (400 levels, 100ms) | `trades` | `funding-rate`, `open-interest`, `mark-price`, `liquidation-orders` |
+Measured on a laptop, all 4,148 markets: ~35k messages/s, ~90% of one CPU core across six processes,
+event-loop lag 0ms, **~174 GB/day zstd** raw log (book ~1/3, BBO ~1/2 of bytes).
 
-Binance USD-M websocket streams are split by category: depth only flows on `/public/stream`,
-aggTrade / forceOrder / markPrice only on `/market/stream`. The legacy `/stream` endpoint accepts
-all subscriptions but silently delivers depth only (verified 2026-10-12).
+Binance USD-M websocket streams are split by category: depth, bookTicker and trade only flow on
+`/public/stream`; markPrice and forceOrder only on `/market/stream`. The legacy `/stream` endpoint
+accepts every subscription but silently delivers depth only (verified 2026-10-12).
 
 ## Raw log format
 
-`data/raw/<venue>/<YYYYMMDD-HH UTC>.jsonl.zst`, append-only, a zstd frame closed every ~1s.
+`data/raw/<venue>-<market>/<YYYYMMDD-HH UTC>.jsonl.zst`, append-only, a zstd frame closed every ~1s.
 
 ```json
 {"k":"ws|rest|evt","c":conn_id,"n":seq,"w":wall_ns,"m":mono_ns, ...,"d":<exchange payload verbatim>}
@@ -34,23 +35,27 @@ all subscriptions but silently delivers depth only (verified 2026-10-12).
 
 * `w` / `m`: local wall-clock and monotonic receive time. REST lines also carry request start `t0w`/`t0m`.
 * `evt`: connect / close / error / handshake_rejected / stop. Gaps are detected offline from these + sequence ids.
-* `data/meta/universe-*.json`: the market list and contract multipliers used for the run.
+* Instrument lists are logged as REST bodies (`\"ep\":\"instruments\"`) at start and every hour; `data/meta/instruments-*.json` is a readable copy.
 
 Nothing is parsed, deduplicated or dropped on the write path. Dedup (e.g. the author's
 "same market, same 5s bucket, identical row" rule) belongs to a later, versioned packing step.
 
 ## Safety
 
-* HTTP 418/429 from REST or a websocket handshake stops the whole collector (shared IP limit).
-* Binance REST weight is read from `x-mbx-used-weight-1m`; snapshots back off above 1200.
+* A rate-limit answer (HTTP 418/429, Bybit 403 / retCode 10006, OKX 50011) from REST or a websocket
+  handshake writes `data/meta/STOP-<venue>`; every collector of that venue stops and refuses to
+  start until the file is removed by hand.
+* Binance REST weight is read from `x-mbx-used-weight-1m`; snapshot pacing slows down above a threshold.
+* Websocket handshakes are staggered per venue; OKX perp and spot share its per-IP connection rate.
 * Stops when disk free space drops below `--min-free-gb` (default 15).
 * Websockets and REST bypass the macOS system proxy on purpose: latency must be from our own vantage point.
 
-## Known limitations of v0
+## Known limitations
 
 * Laptop vantage point: clock offset to exchanges ~0.6–0.75s and REST RTT ~0.7–1s were measured here,
   so receive-latency numbers are not representative. Production capture needs a server near the
   matching engines with chrony.
-* Same-ticker matching only (1000PEPE -> PEPE); same ticker on two venues is not verified to be the same asset.
-* No spot markets, no Gate/Bitget/KuCoin/MEXC/Hyperliquid yet.
-* No book reconstruction yet; `stats.py` only checks sequence continuity.
+* Same ticker on two venues is assumed to be the same asset (crypto vs tradfi collisions are separated via `coin_id`).
+* No Gate/Bitget/KuCoin/MEXC/Hyperliquid yet.
+* Binance liquidations are throttled by the exchange (at most one per symbol per second).
+* `tick/stats.py` still reads the v0 raw layout and is superseded by `normalize` + `verify`.
