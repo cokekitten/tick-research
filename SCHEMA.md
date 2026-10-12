@@ -7,10 +7,11 @@ Parquet metadata).
 
 ## Coverage
 
-All stablecoin-quoted (USDT / USDC / FDUSD / USD1) linear perpetuals and spot markets on Binance,
-Bybit and OKX — no intersection filter. Instrument lists are refreshed hourly; new listings get a
-connection automatically. 2026-10-12: 787 + 825 + 858 + 476 + 485 + 717 = 4,148 markets
-(including ~690 tradfi perps/spot: stocks, ETFs, commodities, FX).
+All USDT-quoted spot markets and USDT-margined linear perpetuals on Binance, Bybit and OKX — no
+intersection filter. Other quote currencies (USDC, FDUSD, USD1, fiat) are not captured; widen
+`registry.STABLES` to add them. Instrument lists are refreshed hourly; new listings get a connection
+automatically. 2026-10-12: perps 746 + 790 + 485, spot 506 + 390 + 419 = 3,336 markets
+(including ~810 tradfi perps/spot: stocks, ETFs, commodities, FX).
 
 ## Units (the same on every venue)
 
@@ -83,10 +84,10 @@ data's `recv_ns`.
 **conn** — collector events (connect / close / error / gap / registry) and `book_gap` from replay.
 Use it to build data-validity masks: no feature may bridge a gap or a reconnect.
 
-## Verified on capture (2026-10-12, 3 minutes, all 4,148 markets)
+## Verified on capture (2026-10-12, 90 seconds, all 3,336 USDT markets)
 
 * Rebuilt best bid/ask from `book` equals the native `bbo` feed at the same update id:
-  37,678 / 37,678 events across all six venue-markets (30 busiest symbols each).
+  15,134 / 15,134 events across all six venue-markets (30 busiest symbols each).
 * No sequence gaps; every Binance REST snapshot fell inside its diff stream and anchored.
-* 379 coin_ids on >= 4 venue-markets: normalized mids agree within 5% except two thin spot books.
+* 326 coin_ids on >= 4 venue-markets: normalized mids agree within 5% except one thin spot book.
 * OKX `books` sends `checksum: 0` on every message at present, so it cannot be used for validation.

@@ -13,13 +13,13 @@ uv sync
 
 ## What is captured
 
-Every stablecoin-quoted linear perpetual and spot market on Binance, Bybit and OKX (4,148 markets on
-2026-10-12), one collector process per venue-market. Per market: L2 book (>=200 levels, 100ms),
+Every USDT-quoted spot market and USDT-margined linear perpetual on Binance, Bybit and OKX (3,336
+markets on 2026-10-12), one collector process per venue-market. Per market: L2 book (>=200 levels, 100ms),
 native BBO (tick-by-tick or 10-20ms), individual trades; perps also liquidations, mark, index,
 funding and open interest. Units, ids and per-venue differences are documented in `SCHEMA.md`.
 
-Measured on a laptop, all 4,148 markets: ~35k messages/s, ~90% of one CPU core across six processes,
-event-loop lag 0ms, **~174 GB/day zstd** raw log (book ~1/3, BBO ~1/2 of bytes).
+Measured on a laptop, all 3,336 USDT markets: ~22k messages/s, ~67% of one CPU core across six
+processes, event-loop lag <=1ms, **~117 GB/day zstd** raw log (book ~1/3, BBO ~1/2 of bytes).
 
 Binance USD-M websocket streams are split by category: depth, bookTicker and trade only flow on
 `/public/stream`; markPrice and forceOrder only on `/market/stream`. The legacy `/stream` endpoint

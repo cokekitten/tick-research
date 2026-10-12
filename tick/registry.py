@@ -29,7 +29,9 @@ import orjson
 
 from .common import http_get
 
-STABLES = ("USDT", "USDC", "FDUSD", "USD1")
+# Only USDT-quoted spot and USDT-margined linear perps are captured (one quote currency, no
+# USDT/USDC basis to model). Widen this tuple to add other stablecoin quotes.
+STABLES = ("USDT",)
 _MULT = re.compile(r"^(1000000|100000|10000|1000|100|1M)(?=[A-Z])")
 
 
