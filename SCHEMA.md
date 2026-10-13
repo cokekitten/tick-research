@@ -31,7 +31,8 @@ automatically. 2026-10-12: perps 746 + 790 + 485, spot 506 + 390 + 419 = 3,336 m
 | `px` | quote currency per **1 coin**. Binance/Bybit `1000PEPE` prices are divided by 1000. |
 | `qty` | **coins**. OKX SWAP contracts x `ctVal`; `1000`-prefixed sizes x 1000. |
 | `px_raw`, `qty_raw` | the exchange's own decimal strings, unconverted (book and trade). Use them for exact audit; the float columns are for features. |
-| `recv_ns` | local wall-clock receive time (ns). |
+| `recv_ns` | local wall-clock receive time (ns). When the collector runs its own socket (default), this is the **kernel's packet arrival time** (`SO_TIMESTAMPNS`), taken in softirq context and immune to CPU scheduling. |
+| `kw` (raw ws records only) | kernel packet-arrival wall-clock (ns), present when the raw transport is used. `recv_ns` is set to the same value; the field makes the semantics explicit and lets an old websockets-recorded segment be told apart. |
 | `avail_ns` | earliest local time the row could be known (book only). **Use this, not recv_ns, for causal features.** |
 | `ex_ms` | exchange event time (ms) as published; null where the venue publishes none (Binance spot bookTicker). |
 | side / `trade.side` | `1` = bid / taker buy, `-1` = ask / taker sell. |

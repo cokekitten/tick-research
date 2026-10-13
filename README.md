@@ -36,8 +36,12 @@ start writes new files. A lock file refuses a second collector for the same venu
 {"k":"ws|rest|evt","c":conn_id,"n":seq,"w":wall_ns,"m":mono_ns, ...,"d":<exchange payload verbatim>}
 ```
 
-* `w` / `m`: local wall-clock and monotonic receive time. REST lines also carry request start `t0w`/`t0m`.
+* `w` / `m`: local wall-clock and monotonic receive time. The collector owns its sockets and reads
+  with `recvmsg()`, so `w` is the kernel's packet-arrival timestamp (`SO_TIMESTAMPNS`) — measured
+  0.2 ms from arrival versus 30-2300 ms for a library-stamped dequeue under CPU load. REST lines also
+  carry request start `t0w`/`t0m`.
 * `evt`: connect / close / error / gap / sub_rejected / task_error / registry / stop.
+  The connect event carries `"transport":"raw+kernel_ts"` (own socket) or the websockets fallback.
 * Instrument lists are logged as REST bodies (`"ep":"instruments"`) at start and every hour.
 * A zstd frame is closed every second; a process crash loses at most ~1s. Data is not fsync'd, so an
   OS crash or power loss can lose more.
