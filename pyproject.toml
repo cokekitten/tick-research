@@ -6,6 +6,7 @@ requires-python = ">=3.14"  # compression.zstd is stdlib from 3.14
 dependencies = [
     "orjson>=3.13.0",
     "pyarrow>=26.0.0",
+    "uvloop>=0.23.0",
     "websockets>=14",
 ]
 

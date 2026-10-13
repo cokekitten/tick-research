@@ -664,11 +664,16 @@ def main():
     ap.add_argument("--mod", type=int, default=0, help="shard by rank: keep markets where rank %% MOD == REM")
     ap.add_argument("--rem", type=int, default=0, help="this shard's remainder, used with --mod")
     ap.add_argument("--tag", default="", help="suffix for this shard's raw stream name")
+    ap.add_argument("--uvloop", action="store_true", help="use uvloop's C event loop instead of asyncio's")
     ap.add_argument("--shard", type=int, default=50, help="markets per websocket connection")
     ap.add_argument("--bbo", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--registry-min", type=float, default=60, help="instrument list refresh interval")
     ap.add_argument("--min-free-gb", type=float, default=15)
-    raise SystemExit(asyncio.run(amain(ap.parse_args())))
+    args = ap.parse_args()
+    if args.uvloop:
+        import uvloop
+        uvloop.install()
+    raise SystemExit(asyncio.run(amain(args)))
 
 
 if __name__ == "__main__":
