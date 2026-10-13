@@ -29,6 +29,8 @@ def main():
     ap.add_argument("--root", default="data")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--no-bbo", action="store_true")
+    ap.add_argument("--no-raw-ws", action="store_true",
+                    help="fall back to the websockets library (timestamps get delayed under load)")
     ap.add_argument("--max-restarts", type=int, default=6, help="per collector per hour before giving up")
     a = ap.parse_args()
 
@@ -52,6 +54,8 @@ def main():
             cmd += ["--limit", str(a.limit)]
         if a.no_bbo:
             cmd.append("--no-bbo")
+        if not a.no_raw_ws:
+            cmd.append("--raw-ws")   # kernel packet-arrival timestamps (SO_TIMESTAMPNS)
         log = open(os.path.join(a.root, "logs", f"{job}.log"), "a")
         procs[job] = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
         print(f"started {job} pid={procs[job].pid}", flush=True)

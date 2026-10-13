@@ -27,8 +27,10 @@ from dataclasses import dataclass, field
 
 import orjson
 import websockets
+import websockets.exceptions
 
 from .common import RateLimited, RawWriter, as_json_text, http_get, new_run_id
+from .wsraw import RawWsConn
 from .registry import INSTRUMENT_URLS, PARSERS, fetch_volumes
 
 TIME_URLS = {
@@ -49,6 +51,7 @@ class Ctx:
     def __init__(self, a):
         self.root, self.venue, self.market = a.root, a.venue, a.market
         self.stream = a.venue + "-" + a.market + ("-" + a.tag if a.tag else "")
+        self.raw_ws = getattr(a, "raw_ws", False)
         self.min_free = a.min_free_gb * 1e9
         self.stop = asyncio.Event()
         self.fatal: str | None = None
@@ -162,6 +165,59 @@ def _is_rate_reject(msg) -> bool:
     return "too many" in low or '"code":"60014"' in msg or '"code":"63999"' in msg or "rate limit" in low
 
 
+async def _raw_ws_session(ctx: Ctx, spec: Spec, st: "ConnState", conn: int, check_errors_box: list):
+    """Same session as ws_loop's body, but the socket is ours and every message carries the kernel's
+    packet arrival time (field `kw`), which stays accurate even when the process is starved of CPU."""
+    w = ctx.w
+    scheme, rest = spec.url.split("://", 1)
+    host_path = rest.split("/", 1)
+    host = host_path[0]
+    path = "/" + (host_path[1] if len(host_path) > 1 else "")
+    host, _, port_s = host.partition(":")
+    port = int(port_s) if port_s else (443 if scheme == "wss" else 80)
+    ws = RawWsConn(asyncio.get_running_loop(), host, path, port)
+    await asyncio.to_thread(ws.start)
+    try:
+        w.event(conn, {"type": "connect", "name": spec.name, "url": spec.url[:300], "topics": spec.topics,
+                       "transport": "raw+kernel_ts"})
+        for m in spec.subscribe:
+            await ws.send(m)
+        if spec.on_open:
+            spec.on_open(conn)
+        pinger = asyncio.create_task(_pinger(ws, spec.app_ping, 20)) if spec.app_ping else None
+        try:
+            async for payload, kts, dts in ws.drain():
+                if payload.startswith(b"WARN: backlog"):
+                    w.event(conn, {"type": "rawws_backlog", "name": spec.name, "detail": payload.decode()})
+                    continue
+                now = time.monotonic_ns()
+                text = payload.decode("utf-8", "replace")
+                extra = {"kw": kts} if kts else None
+                w.write("ws", conn, kts or dts, now, text, extra)
+                ctx.msgs += 1
+                if len(text) < 600 and _is_reject(text):
+                    w.event(conn, {"type": "sub_rejected", "name": spec.name, "msg": text[:400]})
+                    if _is_rate_reject(text):
+                        ctx.rate_limited(f"websocket reject: {text[:200]}")
+                if spec.check:
+                    try:
+                        spec.check(st, ws, text)
+                    except Exception as e:  # noqa: BLE001
+                        check_errors_box[0] += 1
+                        if check_errors_box[0] <= 5:
+                            w.event(conn, {"type": "check_error", "name": spec.name, "err": repr(e)[:300]})
+                if ctx.stop.is_set():
+                    break
+        finally:
+            if pinger:
+                pinger.cancel()
+            for t in list(st.tasks):
+                t.cancel()
+        w.event(conn, {"type": "close", "name": spec.name, "reason": ws.close_reason, "resyncs": st.resyncs})
+    finally:
+        ws.close()
+
+
 async def _pinger(ws, payload: str, every: float):
     while True:
         await asyncio.sleep(every)
@@ -178,6 +234,15 @@ async def ws_loop(ctx: Ctx, spec: Spec, start_delay: float = 0.0):
         st = ConnState(ctx, conn, spec)
         check_errors = 0
         try:
+            if ctx.raw_ws:
+                check_errors_box = [check_errors]
+                await _raw_ws_session(ctx, spec, st, conn, check_errors_box)
+                check_errors = check_errors_box[0]
+                if ctx.stop.is_set():
+                    break
+                await sleep_or_stop(ctx, backoff + random.uniform(0, 3))
+                backoff = min(backoff * 2, 60.0)
+                continue
             async with websockets.connect(spec.url, proxy=None, max_size=64 << 20, open_timeout=15,
                                           ping_interval=20, ping_timeout=30, close_timeout=5) as ws:
                 w.event(conn, {"type": "connect", "name": spec.name, "url": spec.url[:300], "topics": spec.topics})
@@ -664,6 +729,8 @@ def main():
     ap.add_argument("--mod", type=int, default=0, help="shard by rank: keep markets where rank %% MOD == REM")
     ap.add_argument("--rem", type=int, default=0, help="this shard's remainder, used with --mod")
     ap.add_argument("--tag", default="", help="suffix for this shard's raw stream name")
+    ap.add_argument("--raw-ws", action="store_true",
+                    help="own the socket: timestamp with the kernel's packet arrival time (SO_TIMESTAMPNS)")
     ap.add_argument("--uvloop", action="store_true", help="use uvloop's C event loop instead of asyncio's")
     ap.add_argument("--shard", type=int, default=50, help="markets per websocket connection")
     ap.add_argument("--bbo", action=argparse.BooleanOptionalAction, default=True)
