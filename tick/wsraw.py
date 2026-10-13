@@ -60,10 +60,23 @@ def split_frames(buf: bytes):
     return out, buf[i:]
 
 
+RCVBUF_BYTES = 8 << 20   # ask for 8 MiB (kernel doubles it; needs net.core.rmem_max >= 16 MiB)
+
+
 class RawWs:
     def __init__(self, host: str, path: str, port: int = 443, timeout: float = 15.0):
         self.host, self.path, self.port = host, path, port
-        self.sock = socket.create_connection((host, port), timeout=timeout)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Deep receive buffer: when the reader thread is starved for CPU, a full socket buffer makes
+        # TCP apply back pressure, which delays the exchange's own publishing — the data then really
+        # does arrive late. A deeper buffer absorbs the stall instead.
+        try:
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, RCVBUF_BYTES)
+            self.rcvbuf = self.sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+        except OSError:
+            self.rcvbuf = None
+        self.sock.settimeout(timeout)
+        self.sock.connect((host, port))
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.kernel_ts = True
         try:
