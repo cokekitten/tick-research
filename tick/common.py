@@ -120,12 +120,18 @@ class RawWriter:
         os.replace(self.path, self.path[: -len(".partial")] + ".jsonl.zst")
         self.f = None
 
-    def write(self, kind: str, conn: int, wall_ns: int, mono_ns: int, data_text: str, extra: dict | None = None):
+    def write(self, kind: str, conn: int, wall_ns: int, mono_ns: int, data, extra: dict | None = None):
+        """Append one record. `data` is the payload as raw bytes (spliced in directly — the hot path
+        does no decode/re-encode) or str (events, encoded here). Byte-identical to the old str path
+        for valid UTF-8, which all exchange payloads are."""
+        if isinstance(data, str):
+            data = data.encode()
         if self.f is None or wall_ns // 1_000_000_000 >= self.seg_until or self.seg_bytes >= self.roll_bytes:
             self._open(wall_ns)
         self.n += 1
         ex = "".join(f',"{k}":{json.dumps(v)}' for k, v in (extra or {}).items())
-        line = f'{{"k":"{kind}","c":{conn},"n":{self.n},"w":{wall_ns},"m":{mono_ns}{ex},"d":{data_text}}}\n'.encode()
+        head = f'{{"k":"{kind}","c":{conn},"n":{self.n},"w":{wall_ns},"m":{mono_ns}{ex},"d":'.encode()
+        line = head + data + b"}\n"
         self.raw_bytes += len(line)
         self.seg_bytes += len(line)
         self.f.write(line)

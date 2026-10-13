@@ -191,17 +191,18 @@ async def _raw_ws_session(ctx: Ctx, spec: Spec, st: "ConnState", conn: int, chec
                     w.event(conn, {"type": "rawws_backlog", "name": spec.name, "detail": payload.decode()})
                     continue
                 now = time.monotonic_ns()
-                text = payload.decode("utf-8", "replace")
                 extra = {"kw": kts} if kts else None
-                w.write("ws", conn, kts or dts, now, text, extra)
+                w.write("ws", conn, kts or dts, now, payload, extra)   # bytes：零解码零重编码
                 ctx.msgs += 1
-                if len(text) < 600 and _is_reject(text):
-                    w.event(conn, {"type": "sub_rejected", "name": spec.name, "msg": text[:400]})
-                    if _is_rate_reject(text):
-                        ctx.rate_limited(f"websocket reject: {text[:200]}")
+                if len(payload) < 600:          # 拒绝/控制消息都很短，长消息无需解码
+                    text = payload.decode("utf-8", "replace")
+                    if _is_reject(text):
+                        w.event(conn, {"type": "sub_rejected", "name": spec.name, "msg": text[:400]})
+                        if _is_rate_reject(text):
+                            ctx.rate_limited(f"websocket reject: {text[:200]}")
                 if spec.check:
                     try:
-                        spec.check(st, ws, text)
+                        spec.check(st, ws, payload)
                     except Exception as e:  # noqa: BLE001
                         check_errors_box[0] += 1
                         if check_errors_box[0] <= 5:
@@ -350,9 +351,16 @@ class Snapshots:
             self.request(sym, conn, "retry")
 
 
+def _prefix_has(msg, needle: str, window: int) -> bool:
+    """Cheap early-out that works on both the raw path (bytes) and the websockets fallback (str)."""
+    if isinstance(msg, bytes):
+        return needle.encode() in msg[:window]
+    return needle in msg[:window]
+
+
 def binance_depth_check(snaps: Snapshots, spot: bool):
-    def check(st: ConnState, ws, msg: str):
-        if "@depth" not in msg[:72]:
+    def check(st: ConnState, ws, msg):
+        if not _prefix_has(msg, "@depth", 72):
             return
         x = orjson.loads(msg)["data"]
         s = x["s"]
@@ -440,8 +448,8 @@ class Binance:
 
 
 # ---------------------------------------------------------------- Bybit
-def bybit_book_check(st: ConnState, ws, msg: str):
-    if '"orderbook.200.' not in msg[:40]:
+def bybit_book_check(st: ConnState, ws, msg):
+    if not _prefix_has(msg, '"orderbook.200.', 40):
         return
     d = orjson.loads(msg)
     topic, u = d["topic"], d["data"]["u"]
@@ -489,8 +497,8 @@ class Bybit:
 
 
 # ---------------------------------------------------------------- OKX
-def okx_book_check(st: ConnState, ws, msg: str):
-    if '"channel":"books"' not in msg[:60] or '"data"' not in msg[:200]:
+def okx_book_check(st: ConnState, ws, msg):
+    if not _prefix_has(msg, '"channel":"books"', 60) or not _prefix_has(msg, '"data"', 200):
         return
     d = orjson.loads(msg)
     inst = d["arg"]["instId"]
