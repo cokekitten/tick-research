@@ -173,6 +173,7 @@ class RawWs:
     def send_text(self, text: str):
         self._frame(OP_TEXT, text.encode())
 
+
     # ---------------- messages ----------------
     def messages(self, idle_timeout: float = 60.0):
         """Yield (payload_bytes, kernel_arrival_ns|None, dequeue_ns)."""

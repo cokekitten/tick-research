@@ -234,6 +234,7 @@ async def ws_loop(ctx: Ctx, spec: Spec, start_delay: float = 0.0):
         conn = ctx.conn_id()
         st = ConnState(ctx, conn, spec)
         check_errors = 0
+        started = time.monotonic()
         try:
             if ctx.raw_ws:
                 check_errors_box = [check_errors]
@@ -288,6 +289,11 @@ async def ws_loop(ctx: Ctx, spec: Spec, start_delay: float = 0.0):
             raise
         except Exception as e:  # noqa: BLE001 - recorded, then reconnect
             w.event(conn, {"type": "error", "name": spec.name, "err": f"{type(e).__name__}: {e}"[:500]})
+        # A session that stayed up a while ended for an external reason (the venue cycles
+        # connections); reconnect promptly. Without this reset the raw path doubles the delay on
+        # every drop and soon parks at the 60 s cap, leaving minutes-long holes per market.
+        if time.monotonic() - started > 60.0:
+            backoff = 1.0
         if ctx.stop.is_set():
             break
         await sleep_or_stop(ctx, backoff + random.uniform(0, 3))
