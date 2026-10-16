@@ -243,7 +243,7 @@ async def ws_loop(ctx: Ctx, spec: Spec, start_delay: float = 0.0):
                 if ctx.stop.is_set():
                     break
                 await sleep_or_stop(ctx, backoff + random.uniform(0, 3))
-                backoff = min(backoff * 2, 60.0)
+                backoff = min(backoff * 2, 30.0)
                 continue
             async with websockets.connect(spec.url, proxy=None, max_size=64 << 20, open_timeout=15,
                                           ping_interval=20, ping_timeout=30, close_timeout=5) as ws:
@@ -289,15 +289,16 @@ async def ws_loop(ctx: Ctx, spec: Spec, start_delay: float = 0.0):
             raise
         except Exception as e:  # noqa: BLE001 - recorded, then reconnect
             w.event(conn, {"type": "error", "name": spec.name, "err": f"{type(e).__name__}: {e}"[:500]})
-        # A session that stayed up a while ended for an external reason (the venue cycles
+        # A session that stayed up even briefly ended for an external reason (the venue cycles
         # connections); reconnect promptly. Without this reset the raw path doubles the delay on
-        # every drop and soon parks at the 60 s cap, leaving minutes-long holes per market.
-        if time.monotonic() - started > 60.0:
+        # every drop and, since connection lifetimes are often under 60 s, it never recovers —
+        # measured reconnect delays reached 122 s (1+2+4+8+16+32+60) and left minute-long holes.
+        if time.monotonic() - started > 20.0:
             backoff = 1.0
         if ctx.stop.is_set():
             break
         await sleep_or_stop(ctx, backoff + random.uniform(0, 3))
-        backoff = min(backoff * 2, 60.0)
+        backoff = min(backoff * 2, 30.0)
 
 
 def shards(items: list, size: int) -> list[list]:
