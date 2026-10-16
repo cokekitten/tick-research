@@ -32,6 +32,34 @@ SCM_TIMESTAMPNS = 35
 OP_CONT, OP_TEXT, OP_BIN, OP_CLOSE, OP_PING, OP_PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA
 
 
+class Backlog:
+    """Process-wide cap on queued-but-unwritten messages.
+
+    Without a cap a starved writer lets the reader thread pile up gigabytes, and the OOM killer
+    then kills the process — losing every queued message *and* its whole route for the restart.
+    Once the cap is hit the reader simply stops reading: the socket buffer and TCP back pressure
+    make the venue slow down instead, so nothing is dropped, it only arrives later (and the kernel
+    timestamp still records the true arrival time).
+    """
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.n = 0
+
+    def full(self) -> bool:
+        return self.n >= self.limit
+
+
+_BACKLOG: Backlog | None = None
+
+
+def backlog() -> Backlog:
+    global _BACKLOG
+    if _BACKLOG is None:
+        _BACKLOG = Backlog(int(os.environ.get("RAW_WS_BACKLOG_LIMIT", 200_000)))
+    return _BACKLOG
+
+
 def split_frames(buf: bytes):
     """Return ([ (opcode, payload, total_len) ... ], remainder). Server frames are unmasked."""
     out, i, n = [], 0, len(buf)
@@ -242,7 +270,7 @@ class RawWsConn:
     def __init__(self, loop, host, path, port=443, queue_warn=200_000):
         self.loop = loop
         self.host, self.path, self.port = host, path, port
-        self.queue_warn = queue_warn
+        self.queue_warn = queue_warn or max(1000, backlog().limit * 3 // 10)
         self.inbox: collections.deque = collections.deque()
         self.outbox: collections.deque = collections.deque()
         self.wake = asyncio.Event()
@@ -288,9 +316,13 @@ class RawWsConn:
     def _loop(self):
         sock = self.ws.sock
         buf = b""
+        budget = backlog()
         while not self.closed:
             while self.outbox:  # subscriptions, pings, pongs
                 self.ws.send_text(self.outbox.popleft())
+            if budget.full():
+                time.sleep(0.05)     # writer is behind: apply back pressure instead of growing memory
+                continue
             r, _, _ = select.select([sock], [], [], 0.5)
             if not r:
                 continue
@@ -308,6 +340,7 @@ class RawWsConn:
                     if now is None:
                         now = time.time_ns()
                     self.inbox.append((payload, self.ws.last_ts, now))
+                    budget.n += 1
                     self.msgs += 1
                 elif opcode == OP_PING:
                     self.ws._frame(OP_PONG, payload)
@@ -326,6 +359,7 @@ class RawWsConn:
         """Yield (payload, kernel_ts, dequeue_ts) as they become available."""
         while True:
             while self.inbox:
+                backlog().n -= 1
                 yield self.inbox.popleft()
             if self.closed:
                 if self.error:

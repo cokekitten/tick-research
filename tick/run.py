@@ -6,7 +6,7 @@
 Each child logs to data/logs/<venue>-<market>.log. A child that exits because of a rate limit
 (exit code 2 + data/meta/STOP-<venue>) is not restarted, and the other collectors of that venue
 stop by themselves when they see the stop file. Other crashes are restarted with exponential backoff
-(30s, 60s, ... up to 10 min), at most --max-restarts times per hour.
+(5s, 10s, ... up to 5 min), at most --max-restarts times per hour.
 """
 import argparse
 import os
@@ -94,7 +94,7 @@ def main():
                           flush=True)
                     done.add(job)
                     continue
-                delay = min(30 * 2 ** len(recent[job]), 600)
+                delay = min(5 * 2 ** len(recent[job]), 300)
                 print(f"{job} crashed code={code}; restart in {delay}s", flush=True)
                 restart_at[job] = now + delay
             elif now >= restart_at[job]:

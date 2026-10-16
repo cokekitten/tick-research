@@ -40,4 +40,4 @@ def test_supervisor_restarts_crashed_collector(tmp_path, monkeypatch):
     run.main()
     assert starts.count("binance-perp") == 3      # crashed twice, restarted twice, then finished
     assert starts.count("okx-perp") == 1          # rate-limit exit: not restarted
-    assert clock[0] >= 30 + 60                    # exponential backoff was honoured
+    assert clock[0] >= 5 + 10                     # exponential backoff was honoured
