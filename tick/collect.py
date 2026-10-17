@@ -17,6 +17,7 @@ exists (delete it by hand after checking).
 """
 import argparse
 import asyncio
+import concurrent.futures
 import itertools
 import os
 import random
@@ -165,6 +166,12 @@ def _is_rate_reject(msg) -> bool:
     return "too many" in low or '"code":"60014"' in msg or '"code":"63999"' in msg or "rate limit" in low
 
 
+# WebSocket handshakes run here, not in the default executor: REST polling can occupy every
+# default worker (rest_sem allows 8 concurrent calls, the default pool is cpu+4 = 8 on a 4-core
+# box), which left reconnects queued behind HTTP for tens of seconds.
+_HS_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=16, thread_name_prefix="wshs")
+
+
 async def _raw_ws_session(ctx: Ctx, spec: Spec, st: "ConnState", conn: int, check_errors_box: list):
     """Same session as ws_loop's body, but the socket is ours and every message carries the kernel's
     packet arrival time (field `kw`), which stays accurate even when the process is starved of CPU."""
@@ -176,7 +183,7 @@ async def _raw_ws_session(ctx: Ctx, spec: Spec, st: "ConnState", conn: int, chec
     host, _, port_s = host.partition(":")
     port = int(port_s) if port_s else (443 if scheme == "wss" else 80)
     ws = RawWsConn(asyncio.get_running_loop(), host, path, port)
-    await asyncio.to_thread(ws.start)
+    await asyncio.get_running_loop().run_in_executor(_HS_POOL, ws.start)
     try:
         w.event(conn, {"type": "connect", "name": spec.name, "url": spec.url[:300], "topics": spec.topics,
                        "transport": "raw+kernel_ts"})
