@@ -192,6 +192,7 @@ async def _raw_ws_session(ctx: Ctx, spec: Spec, st: "ConnState", conn: int, chec
         if spec.on_open:
             spec.on_open(conn)
         pinger = asyncio.create_task(_pinger(ws, spec.app_ping, 20)) if spec.app_ping else None
+        last_yield = time.monotonic()
         try:
             async for payload, kts, dts in ws.drain():
                 if payload.startswith(b"WARN: backlog"):
@@ -216,6 +217,13 @@ async def _raw_ws_session(ctx: Ctx, spec: Spec, st: "ConnState", conn: int, chec
                             w.event(conn, {"type": "check_error", "name": spec.name, "err": repr(e)[:300]})
                 if ctx.stop.is_set():
                     break
+                # Yield to the event loop regularly. At high load the inbox is never empty, so
+                # without this the loop starves every other task — reconnects waited out their
+                # backoff and then another 40 s, and loop_lag reached minutes.
+                now_m = time.monotonic()
+                if now_m - last_yield > 0.05:
+                    last_yield = now_m
+                    await asyncio.sleep(0)
         finally:
             if pinger:
                 pinger.cancel()
