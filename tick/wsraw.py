@@ -32,6 +32,13 @@ SCM_TIMESTAMPNS = 35
 OP_CONT, OP_TEXT, OP_BIN, OP_CLOSE, OP_PING, OP_PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA
 
 
+# A live connection on any venue carries enough markets that market data always arrives within
+# this window. If it stays silent, the connection is dead in a way that never raises (observed:
+# two Binance perp shards received nothing for 17 hours while the socket stayed ESTABLISHED), so
+# the reader has to notice and drop it itself.
+STALL_DETECT_S = float(os.environ.get("RAW_WS_STALL_S", 120))
+
+
 class Backlog:
     """Process-wide cap on queued-but-unwritten messages.
 
@@ -317,9 +324,15 @@ class RawWsConn:
         sock = self.ws.sock
         buf = b""
         budget = backlog()
+        last_data = time.monotonic()
         while not self.closed:
             while self.outbox:  # subscriptions, pings, pongs
                 self.ws.send_text(self.outbox.popleft())
+            stalled = time.monotonic() - last_data
+            if stalled > STALL_DETECT_S:
+                self.error = ConnectionError(f"stalled {stalled:.0f}s without market data")
+                self.close_reason = f"stalled {stalled:.0f}s"
+                return
             if budget.full():
                 time.sleep(0.05)     # writer is behind: apply back pressure instead of growing memory
                 continue
@@ -339,6 +352,7 @@ class RawWsConn:
                 if opcode in (OP_TEXT, OP_BIN):
                     if now is None:
                         now = time.time_ns()
+                    last_data = time.monotonic()
                     self.inbox.append((payload, self.ws.last_ts, now))
                     budget.n += 1
                     self.msgs += 1
