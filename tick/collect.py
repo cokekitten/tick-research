@@ -31,7 +31,7 @@ import websockets
 import websockets.exceptions
 
 from .common import RateLimited, RawWriter, as_json_text, http_get, new_run_id
-from .wsraw import RawWsConn
+from .wsraw import RawWsConn, backlog
 from .registry import INSTRUMENT_URLS, PARSERS, fetch_volumes
 
 TIME_URLS = {
@@ -667,8 +667,13 @@ async def guards(ctx: Ctx, duration: float):
         if free < ctx.min_free:
             ctx.halt(f"disk free {free / 1e9:.1f}GB < {ctx.min_free / 1e9:.0f}GB")
         dt = now - last_t
+        # backlog= is the queued-but-unwritten depth against the process-wide cap (what back pressure
+        # holds at its limit during peaks); it explains most of the RSS growth, so it belongs in the
+        # status line rather than only in a WARN that fires once per process.
+        _bl = backlog()
         print(f"[{now - t0:7.0f}s] msgs={ctx.msgs} +{(ctx.msgs - last_msgs) / dt:.0f}/s "
               f"cpu={100 * (cpu - last_cpu) / dt:.0f}% loop_lag_max={1000 * max_lag:.0f}ms "
+              f"backlog={_bl.n}/{_bl.limit} "
               f"raw={ctx.w.raw_bytes / 1e6:.0f}MB free={free / 1e9:.0f}GB", flush=True)
         last_t, last_cpu, last_msgs, max_lag = now, cpu, ctx.msgs, 0.0
         if duration and now - t0 >= duration:
